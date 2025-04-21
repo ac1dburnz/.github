@@ -11,10 +11,14 @@ ___
 
 * [Actions](#actions)
   * [`container-logs-check`](#container-logs-check)
+  * [`docker-scout`](#docker-scout)
   * [`gotest-annotations`](#gotest-annotations)
   * [`install-k3s`](#install-k3s)
 * [Reusable workflows](#reusable-workflows)
+  * [`build-distribute-mp`](#build-distribute-mp)
+  * [`bake-distribute-mp`](#bake-distribute-mp)
   * [`list-commits`](#list-commits)
+  * [`pr-assign-author`](#pr-assign-author)
   * [`releases-json`](#releases-json)
 
 ## Actions
@@ -27,6 +31,9 @@ testing for containers.
 
 ```yaml
 name: test
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -74,6 +81,43 @@ smbd version 4.18.2 started.
 🎉 Found " started." in container logs
 ```
 
+### `docker-scout`
+
+[`docker-scout` composite action](.github/actions/docker-scout/action.yml) scans
+Docker images for vulnerabilities using [Docker Scout](https://github.com/docker/scout-cli).
+
+```yaml
+name: ci
+
+permissions:
+  contents: read
+
+on:
+  push:
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      -
+        name: Scout
+        id: scout
+        uses: crazy-max/.github/.github/actions/docker-scout@main
+        with:
+          format: sarif
+          image: alpine:latest
+      -
+        name: Upload SARIF report
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.scout.outputs.result-file }}
+```
+
+You can find the list of available inputs directly in [the action configuration](.github/actions/docker-scout/action.yml).
+
 ### `gotest-annotations`
 
 [`gotest-annotations` composite action](.github/actions/gotest-annotations/action.yml)
@@ -81,6 +125,9 @@ generates GitHub annotations for generated Go JSON test reports.
 
 ```yaml
 name: ci
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -91,7 +138,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Test
         run: |
@@ -112,26 +159,161 @@ installs [k3s](https://k3s.io/) on a runner.
 ```yaml
 name: ci
 
+permissions:
+  contents: read
+
 on:
   push:
 
 jobs:
   install-k3s:
-    # does not work with ubuntu-22.04 atm:
-    # E0310 17:16:57.210215    2047 memcache.go:238] couldn't get current server API group list: Get "https://127.0.0.1:6443/api?timeout=32s": dial tcp 127.0.0.1:6443: connect: connection refused
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v3
       -
         name: Install k3s
         uses: crazy-max/.github/.github/actions/install-k3s@main
         with:
-          version: v1.21.2-k3s1
+          version: v1.32.2+k3s1
 ```
 
 ## Reusable workflows
+
+### `build-distribute-mp`
+
+[`build-distribute-mp` reusable workflow](.github/workflows/build-distribute-mp.yml)
+distributes multi-platform builds across runners efficiently.
+
+```yaml
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    uses: crazy-max/.github/.github/workflows/build-distribute-mp.yml@main
+    with:
+      push: ${{ github.event_name != 'pull_request' }}
+      cache: true
+      meta-image: user/app
+      build-platforms: linux/amd64,linux/arm64
+      login-username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      login-password: ${{ secrets.DOCKERHUB_TOKEN }}
+```
+
+Here are the main inputs for this reusable workflow:
+
+| Name              | Type     | Default | Description                                                                                                                                                                                                                                                |
+|-------------------|----------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `runner`          | String   | `auto`¹ | Runner instance (e.g., `ubuntu-latest`).                                                                                                                                                                                                                   |
+| `push`            | Bool     | `false` | Push image to registry.                                                                                                                                                                                                                                    |
+| `cache`           | Bool     | `false` | Enable GitHub Actions cache backend.                                                                                                                                                                                                                       |
+| `cache-warmup`    | Bool     | `true`  | Enable cache warmup if cache is enabled.                                                                                                                                                                                                                   |
+| `cache-scope`     | String   |         | Which scope GitHub Actions cache object belongs to if `cache` enabled.                                                                                                                                                                                     |
+| `cache-mode`      | String   | `min`   | Cache layers to export if `cache` enabled (one of `min` or `max`).                                                                                                                                                                                         |
+| `summary`         | Bool     | `true`  | Enable [build summary](https://docs.docker.com/build/ci/github-actions/build-summary/) generation.                                                                                                                                                         |
+| `envs`            | List     |         | Environment variables to set.                                                                                                                                                                                                                              |
+| `meta-image`      | String   |         | Image to use as base name for tags. This input is similar to [`images` input in `docker/metadata-action`](https://github.com/docker/metadata-action?tab=readme-ov-file#images-input) used in this reusable workflow but accepts a single image name.       |
+| `build-platforms` | List/CSV |         | List of target platforms for build. This input is similar to [`platforms` input in `docker/build-push-action`](https://github.com/docker/build-push-action?tab=readme-ov-file#inputs) used in this reusable workflow. At least two platforms are required. |
+| `login-registry`  | String   |         | Server address of Docker registry. If not set then will default to Docker Hub. This input is similar to [`registry` input in `docker/login-action`](https://github.com/docker/login-action?tab=readme-ov-file#inputs) used in this reusable workflow.      |
+| `login-username`² | String   |         | Username used to log against the Docker registry. This input is similar to [`username` input in `docker/login-action`](https://github.com/docker/login-action?tab=readme-ov-file#inputs) used in this reusable workflow.                                   |
+| `login-password`  | String   |         | Specifies whether the given registry is ECR (auto, true or false). This input is similar to [`password` input in `docker/login-action`](https://github.com/docker/login-action?tab=readme-ov-file#inputs) used in this reusable workflow.                  |
+
+> [!NOTE]
+> ¹ `auto` will choose the best matching runner depending on the target
+> platform being built (either `ubuntu-latest` or `ubuntu-24.04-arm`).
+> 
+> ² `login-username` can be used as either an input or secret.
+
+You can find the list of available inputs directly in [the reusable workflow](.github/workflows/build-distribute-mp.yml).
+
+### `bake-distribute-mp`
+
+[`bake-distribute-mp` reusable workflow](.github/workflows/bake-distribute-mp.yml)
+distributes multi-platform builds across runners efficiently.
+
+```hcl
+variable "DEFAULT_TAG" {
+  default = "app:local"
+}
+
+// Special target: https://github.com/docker/metadata-action#bake-definition
+target "docker-metadata-action" {
+  tags = ["${DEFAULT_TAG}"]
+}
+
+// Default target if none specified
+group "default" {
+  targets = ["image-local"]
+}
+
+target "image" {
+  inherits = ["docker-metadata-action"]
+}
+
+target "image-local" {
+  inherits = ["image"]
+  output = ["type=docker"]
+}
+
+target "image-all" {
+  inherits = ["image"]
+  platforms = [
+    "linux/amd64",
+    "linux/arm/v6",
+    "linux/arm/v7",
+    "linux/arm64"
+  ]
+}
+```
+
+```yaml
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    uses: crazy-max/.github/.github/workflows/bake-distribute-mp.yml@main
+    with:
+      target: image-all
+      push: ${{ github.event_name != 'pull_request' }}
+      cache: true
+      meta-image: user/app
+      login-username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      login-password: ${{ secrets.DOCKERHUB_TOKEN }}
+```
+
+Here are the main inputs for this reusable workflow:
+
+| Name              | Type   | Default | Description                                                                                                                                                                                                                                           |
+|-------------------|--------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `runner`          | String | `auto`¹ | Runner instance (e.g., `ubuntu-latest`).                                                                                                                                                                                                              |
+| `target`          | String |         | Multi-platform target to build. This input is similar to [`targets` input in `docker/bake-action`](https://github.com/docker/build-push-action?tab=readme-ov-file#inputs) used in this reusable workflow but accepts a single target.                 |
+| `push`            | Bool   | `false` | Push image to registry.                                                                                                                                                                                                                               |
+| `cache`           | Bool   | `false` | Enable GitHub Actions cache backend.                                                                                                                                                                                                                  |
+| `cache-warmup`    | Bool   | `true`  | Enable cache warmup if cache is enabled.                                                                                                                                                                                                              |
+| `cache-scope`     | String |         | Which scope GitHub Actions cache object belongs to if `cache` enabled.                                                                                                                                                                                |
+| `cache-mode`      | String | `min`   | Cache layers to export if `cache` enabled (one of `min` or `max`).                                                                                                                                                                                    |
+| `summary`         | Bool   | `true`  | Enable [build summary](https://docs.docker.com/build/ci/github-actions/build-summary/) generation.                                                                                                                                                    |
+| `envs`            | List   |         | Environment variables to set.                                                                                                                                                                                                                         |
+| `meta-image`      | String |         | Image to use as base name for tags. This input is similar to [`images` input in `docker/metadata-action`](https://github.com/docker/metadata-action?tab=readme-ov-file#images-input) used in this reusable workflow but accepts a single image name.  |
+| `login-registry`  | String |         | Server address of Docker registry. If not set then will default to Docker Hub. This input is similar to [`registry` input in `docker/login-action`](https://github.com/docker/login-action?tab=readme-ov-file#inputs) used in this reusable workflow. |
+| `login-username`² | String |         | Username used to log against the Docker registry. This input is similar to [`username` input in `docker/login-action`](https://github.com/docker/login-action?tab=readme-ov-file#inputs) used in this reusable workflow.                              |
+| `login-password`  | String |         | Specifies whether the given registry is ECR (auto, true or false). This input is similar to [`password` input in `docker/login-action`](https://github.com/docker/login-action?tab=readme-ov-file#inputs) used in this reusable workflow.             |
+
+> [!NOTE]
+> ¹ `auto` will choose the best matching runner depending on the target
+> platform being built (either `ubuntu-latest` or `ubuntu-24.04-arm`).
+> 
+> ² `login-username` can be used as either an input or secret.
+
+You can find the list of available inputs directly in [the reusable workflow](.github/workflows/bake-distribute-mp.yml).
 
 ### `list-commits`
 
@@ -140,6 +322,9 @@ generates a JSON matrix with the list of commits for a pull request.
 
 ```yaml
 name: ci
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -150,7 +335,6 @@ jobs:
     uses: crazy-max/.github/.github/workflows/list-commits.yml@main
     with:
       limit: 10
-    secrets: inherit
 
   validate:
     runs-on: ubuntu-latest
@@ -163,19 +347,45 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.commit }}
 ```
 
-> **Note**
->
+> [!NOTE]
 > `limit` input is optional and defaults to `0` (unlimited).
+
+### `pr-assign-author`
+
+[`pr-assign-author` reusable workflow](.github/workflows/pr-assign-author.yml)
+assigns the author of a pull request as an assignee.
+
+```yaml
+name: assign-author
+
+permissions:
+  contents: read
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+
+jobs:
+  run:
+    uses: crazy-max/.github/.github/workflows/pr-assign-author.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+```
 
 ### `releases-json`
 
 [`releases-json` reusable workflow](.github/workflows/releases-json.yml)
-generates a JSON file with the list of releases for a given repository.
+generates a JSON file with the list of releases for a given repository. Releases
+tags should be [semver](https://semver.org/) compliant and should not contain
+`latest` or `edge` tags that are handled internally by this action.
 
 ```yaml
 name: ci
@@ -199,7 +409,7 @@ jobs:
     steps:
       -
         name: Download
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: buildx-releases-json
           path: .

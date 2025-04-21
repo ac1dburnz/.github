@@ -4,6 +4,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   push:
@@ -18,7 +22,6 @@ jobs:
       repository: docker/buildx
       artifact_name: buildx-releases-json
       filename: buildx-releases.json
-    secrets: inherit
 
   releases-json-check:
     runs-on: ubuntu-latest
@@ -27,7 +30,7 @@ jobs:
     steps:
       -
         name: Download
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: buildx-releases-json
           path: .
@@ -36,23 +39,74 @@ jobs:
         run: |
           jq . buildx-releases.json
 
+  releases-json-edge:
+    uses: ./.github/workflows/releases-json.yml
+    with:
+      repository: crazy-max/releases-json-test
+      artifact_name: test-edge-releases-json
+      filename: test-edge-releases.json
+
+  releases-json-edge-check:
+    runs-on: ubuntu-latest
+    needs:
+      - releases-json-edge
+    steps:
+      -
+        name: Download
+        uses: actions/download-artifact@v4
+        with:
+          name: test-edge-releases-json
+          path: .
+      -
+        name: Check file
+        run: |
+          jq . test-edge-releases.json
+
+  releases-json-pin:
+    uses: ./.github/workflows/releases-json.yml
+    with:
+      repository: docker/buildx
+      artifact_name: buildx-releases-pin-json
+      filename: buildx-releases-pin.json
+      pin_latest: v0.18.0
+
+  releases-json-pin-check:
+    runs-on: ubuntu-latest
+    needs:
+      - releases-json-pin
+    steps:
+      -
+        name: Download
+        uses: actions/download-artifact@v4
+        with:
+          name: buildx-releases-pin-json
+          path: .
+      -
+        name: Check file
+        run: |
+          jq . buildx-releases-pin.json
+
   install-k3s:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Install k3s
         uses: ./.github/actions/install-k3s
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
         with:
-          version: v1.21.2-k3s1
+          driver: kubernetes
+          driver-opts: qemu.install=true
+          buildkitd-flags: --debug
 
   list-commits:
     uses: ./.github/workflows/list-commits.yml
     with:
       limit: 5
-    secrets: inherit
 
   list-commits-check:
     runs-on: ubuntu-latest
@@ -65,16 +119,16 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.commit }}
 
   container-logs-check:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Run container
         run: |
@@ -88,11 +142,11 @@ jobs:
           timeout: 20
 
   container-logs-check-notfound:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Run container
         run: |
@@ -115,11 +169,11 @@ jobs:
           fi
 
   container-logs-check-failed:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Run container
         run: |
@@ -140,3 +194,96 @@ jobs:
             echo "::error::Should have failed"
             exit 1
           fi
+
+  docker-scout:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
+    permissions:
+      # required to check out the repository
+      contents: read
+      # required to write sarif report
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        format:
+          - packages
+          - sarif
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v4
+      -
+        name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      -
+        name: Scout
+        id: scout
+        uses: ./.github/actions/docker-scout
+        with:
+          image: registry://moby/buildkit:master
+          format: ${{ matrix.format }}
+      -
+        name: Print result
+        run: |
+          set -x
+          cat ${{ steps.scout.outputs.result-file }}
+      -
+        name: Upload SARIF report
+        if: ${{ matrix.format == 'sarif' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.scout.outputs.result-file }}
+
+  build-distribute-mp:
+    uses: ./.github/workflows/build-distribute-mp.yml
+    permissions:
+      # same as global permissions
+      contents: read
+      # required to push to GHCR
+      packages: write
+    with:
+      build-context: https://github.com/docker/buildx.git#v0.21.2
+      build-args: |
+        BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
+        GO_VERSION
+      build-platforms: linux/amd64,linux/arm64
+      push: ${{ github.event_name != 'pull_request' }}
+      cache: true
+      cache-warmup: false
+      cache-scope: build-buildx-bin
+      summary: false
+      envs: |
+        GO_VERSION=1.23.8
+      meta-image: ghcr.io/crazy-max/test-build-distribute-mp
+      login-registry: ghcr.io
+      login-username: ${{ github.actor }}
+    secrets:
+      login-password: ${{ secrets.GITHUB_TOKEN }}
+
+  bake-distribute-mp:
+    uses: ./.github/workflows/bake-distribute-mp.yml
+    permissions:
+      # same as global permissions
+      contents: read
+      # required to push to GHCR
+      packages: write
+    with:
+      bake-source: https://github.com/docker/buildx.git#v0.21.2
+      target: image-cross
+      push: ${{ github.event_name != 'pull_request' }}
+      cache: true
+      cache-warmup: false
+      cache-scope: bake-buildx-bin
+      summary: false
+      envs: |
+        GO_VERSION=1.23.8
+      meta-image: ghcr.io/crazy-max/test-bake-distribute-mp
+      meta-bake-target: meta-helper
+      login-registry: ghcr.io
+      login-username: ${{ github.actor }}
+    secrets:
+      login-password: ${{ secrets.GITHUB_TOKEN }}

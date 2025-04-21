@@ -1,5 +1,9 @@
 name: list-commits
 
+# https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
+permissions:
+  contents: read
+
 on:
   workflow_call:
     inputs:
@@ -20,7 +24,7 @@ jobs:
       -
         name: Generate matrix
         id: generate
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           retries: 3
           script: |
